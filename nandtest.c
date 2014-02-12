@@ -1,3 +1,5 @@
+#define PROGRAM_NAME "nandtest"
+
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
@@ -17,14 +19,15 @@
 
 void usage(void)
 {
-	fprintf(stderr, "usage: nandtest [OPTIONS] <device>\n\n"
-		"  -h, --help		Display this help output\n"
-		"  -m, --markbad	Mark blocks bad if they appear so\n"
-		"  -s, --seed		Supply random seed\n"
-		"  -p, --passes		Number of passes\n"
-		"  -o, --offset		Start offset on flash\n"
-		"  -l, --length		Length of flash to test\n"
-		"  -k, --keep		Restore existing contents after test\n");
+	fprintf(stderr, "usage: %s [OPTIONS] <device>\n\n"
+		"  -h, --help           Display this help output\n"
+		"  -m, --markbad        Mark blocks bad if they appear so\n"
+		"  -s, --seed           Supply random seed\n"
+		"  -p, --passes         Number of passes\n"
+		"  -o, --offset         Start offset on flash\n"
+		"  -l, --length         Length of flash to test\n"
+		"  -k, --keep           Restore existing contents after test\n",
+		PROGRAM_NAME);
 	exit(1);
 }
 
@@ -70,23 +73,23 @@ int erase_and_write(loff_t ofs, unsigned char *data, unsigned char *rbuf)
 	}
 	if (len < meminfo.erasesize) {
 		printf("\n");
-		fprintf(stderr, "Short write (%d bytes)\n", len);
+		fprintf(stderr, "Short write (%zd bytes)\n", len);
 		exit(1);
 	}
 
 	printf("\r%08x: reading...", (unsigned)ofs);
 	fflush(stdout);
-	
+
 	len = pread(fd, rbuf, meminfo.erasesize, ofs);
 	if (len < meminfo.erasesize) {
 		printf("\n");
 		if (len)
-			fprintf(stderr, "Short read (%d bytes)\n", len);
+			fprintf(stderr, "Short read (%zd bytes)\n", len);
 		else
 			perror("read");
 		exit(1);
 	}
-		
+
 	if (ioctl(fd, ECCGETSTATS, &newstats)) {
 		printf("\n");
 		perror("ECCGETSTATS");
@@ -95,12 +98,14 @@ int erase_and_write(loff_t ofs, unsigned char *data, unsigned char *rbuf)
 	}
 
 	if (newstats.corrected > oldstats.corrected) {
-		printf("\nECC corrected at %08x\n", (unsigned) ofs);
+		printf("\n %d bit(s) ECC corrected at %08x\n",
+				newstats.corrected - oldstats.corrected,
+				(unsigned) ofs);
 		oldstats.corrected = newstats.corrected;
 	}
 	if (newstats.failed > oldstats.failed) {
 		printf("\nECC failed at %08x\n", (unsigned) ofs);
-		oldstats.corrected = newstats.corrected;
+		oldstats.failed = newstats.failed;
 	}
 	if (len < meminfo.erasesize)
 		exit(1);
@@ -134,6 +139,8 @@ int main(int argc, char **argv)
 	int keep_contents = 0;
 	uint32_t offset = 0;
 	uint32_t length = -1;
+
+	seed = time(NULL);
 
 	for (;;) {
 		static const char *short_options="hkl:mo:p:s:";
@@ -181,7 +188,7 @@ int main(int argc, char **argv)
 		case 'l':
 			length = strtol(optarg, NULL, 0);
 			break;
-			
+
 		}
 	}
 	if (argc - optind != 1)
@@ -192,7 +199,7 @@ int main(int argc, char **argv)
 		perror("open");
 		exit(1);
 	}
-	
+
 	if (ioctl(fd, MEMGETINFO, &meminfo)) {
 		perror("MEMGETINFO");
 		close(fd);
@@ -203,20 +210,20 @@ int main(int argc, char **argv)
 		length = meminfo.size;
 
 	if (offset % meminfo.erasesize) {
-		fprintf(stderr, "Offset %x not multiple of erase size %x\n", 
+		fprintf(stderr, "Offset %x not multiple of erase size %x\n",
 			offset, meminfo.erasesize);
 		exit(1);
 	}
 	if (length % meminfo.erasesize) {
-		fprintf(stderr, "Length %x not multiple of erase size %x\n", 
+		fprintf(stderr, "Length %x not multiple of erase size %x\n",
 			length, meminfo.erasesize);
 		exit(1);
 	}
 	if (length + offset > meminfo.size) {
-		fprintf(stderr, "Length %x + offset %x exceeds device size %x\n", 
+		fprintf(stderr, "Length %x + offset %x exceeds device size %x\n",
 			length, offset, meminfo.size);
 		exit(1);
-	}		
+	}
 
 	wbuf = malloc(meminfo.erasesize * 3);
 	if (!wbuf) {
@@ -237,6 +244,8 @@ int main(int argc, char **argv)
 	printf("ECC failures   : %d\n", oldstats.failed);
 	printf("Bad blocks     : %d\n", oldstats.badblocks);
 	printf("BBT blocks     : %d\n", oldstats.bbtblocks);
+
+	srand(seed);
 
 	for (pass = 0; pass < nr_passes; pass++) {
 		loff_t test_ofs;
@@ -259,11 +268,11 @@ int main(int argc, char **argv)
 				printf("\r%08x: reading... ", (unsigned)test_ofs);
 				fflush(stdout);
 
-				len = pread(fd, rbuf, meminfo.erasesize, test_ofs);
+				len = pread(fd, kbuf, meminfo.erasesize, test_ofs);
 				if (len < meminfo.erasesize) {
 					printf("\n");
 					if (len)
-						fprintf(stderr, "Short read (%d bytes)\n", len);
+						fprintf(stderr, "Short read (%zd bytes)\n", len);
 					else
 						perror("read");
 					exit(1);

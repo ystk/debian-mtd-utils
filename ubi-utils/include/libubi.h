@@ -35,6 +35,9 @@ extern "C" {
 /* UBI version libubi is made for */
 #define LIBUBI_UBI_VERSION 1
 
+/* Maximum physical eraseblock size in bytes */
+#define UBI_MAX_PEB_SZ (2*1024*1024)
+
 /* UBI library descriptor */
 typedef void * libubi_t;
 
@@ -43,7 +46,8 @@ typedef void * libubi_t;
  * @dev_num: number to assign to the newly created UBI device
  *           (%UBI_DEV_NUM_AUTO should be used to automatically assign the
  *           number)
- * @mtd_num: MTD device number to attach
+ * @mtd_num: MTD device number to attach (used if @mtd_dev_node is %NULL)
+ * @mtd_dev_node: path to MTD device node to attach
  * @vid_hdr_offset: VID header offset (%0 means default offset and this is what
  *                  most of the users want)
  */
@@ -51,6 +55,7 @@ struct ubi_attach_request
 {
 	int dev_num;
 	int mtd_num;
+	const char *mtd_dev_node;
 	int vid_hdr_offset;
 };
 
@@ -93,6 +98,8 @@ struct ubi_info
 
 /**
  * struct ubi_dev_info - UBI device information.
+ * @dev_num: UBI device number
+ * @mtd_num: MTD device number on top of which this UBI device is working
  * @vol_count: count of volumes on this UBI device
  * @lowest_vol_id: lowest volume ID
  * @highest_vol_id: highest volume ID
@@ -114,6 +121,7 @@ struct ubi_info
 struct ubi_dev_info
 {
 	int dev_num;
+	int mtd_num;
 	int vol_count;
 	int lowest_vol_id;
 	int highest_vol_id;
@@ -137,8 +145,6 @@ struct ubi_dev_info
  * @vol_id: ID of this volume
  * @major: major number of corresponding volume character device
  * @minor: minor number of corresponding volume character device
- * @dev_major: major number of corresponding UBI device character device
- * @dev_minor: minor number of corresponding UBI device character device
  * @type: volume type (%UBI_DYNAMIC_VOLUME or %UBI_STATIC_VOLUME)
  * @alignment: alignment of this volume
  * @data_bytes: how many data bytes are stored on this volume (equivalent to
@@ -156,8 +162,6 @@ struct ubi_vol_info
 	int vol_id;
 	int major;
 	int minor;
-	int dev_major;
-	int dev_minor;
 	int type;
 	int alignment;
 	long long data_bytes;
@@ -219,6 +223,23 @@ int ubi_attach_mtd(libubi_t desc, const char *node,
 		   struct ubi_attach_request *req);
 
 /**
+ * ubi_attach - attach an MTD device by its node path.
+ * @desc: UBI library descriptor
+ * @node: name of the UBI control character device node
+ * @req: MTD attach request
+ *
+ * This function creates new UBI device by attaching an MTD device described by
+ * @req. If @req->mtd_dev_node is given it should contain path to the MTD
+ * device node. Otherwise functionality is similar than in function
+ * 'ubi_attach_mtd()' where @req->mtd_num is used.
+ *
+ * Returns %0 in case of success and %-1 in case of failure (errno is set). The
+ * newly created UBI device number is returned in @req->dev_num.
+ */
+int ubi_attach(libubi_t desc, const char *node,
+	       struct ubi_attach_request *req);
+
+/**
  * ubi_detach_mtd - detach an MTD device.
  * @desc: UBI library descriptor
  * @node: name of the UBI control character device node
@@ -229,6 +250,17 @@ int ubi_attach_mtd(libubi_t desc, const char *node,
  * in case of failure.
  */
 int ubi_detach_mtd(libubi_t desc, const char *node, int mtd_num);
+
+/**
+ * ubi_detach - detach an MTD device by its node path.
+ * @desc: UBI library descriptor
+ * @node: name of the UBI control character device node
+ * @mtd_dev_node: path to an MTD device node
+ *
+ * This function detaches an MTD device @mtd_dev_node from UBI. Returns zero in
+ * case of success and %-1 in case of failure.
+ */
+int ubi_detach(libubi_t desc, const char *node, const char *mtd_dev_node);
 
 /**
  * ubi_remove_dev - remove an UBI device.
@@ -312,6 +344,15 @@ int ubi_probe_node(libubi_t desc, const char *node);
  */
 int ubi_get_dev_info(libubi_t desc, const char *node,
 		     struct ubi_dev_info *info);
+
+/**
+ * ubi_dev_present - check whether an UBI device is present.
+ * @desc: UBI library descriptor
+ * @dev_num: UBI device number to check
+ *
+ * This function returns %1 if UBI device is present and %0 if not.
+ */
+int ubi_dev_present(libubi_t desc, int dev_num);
 
 /**
  * ubi_get_dev_info1 - get UBI device information.

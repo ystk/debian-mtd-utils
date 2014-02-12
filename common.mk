@@ -3,6 +3,7 @@ AR := $(CROSS)ar
 RANLIB := $(CROSS)ranlib
 
 # Stolen from Linux build system
+comma = ,
 try-run = $(shell set -e; ($(1)) >/dev/null 2>&1 && echo "$(2)" || echo "$(3)")
 cc-option = $(call try-run, $(CC) $(1) -c -xc /dev/null -o /dev/null,$(1),$(2))
 
@@ -12,9 +13,14 @@ WFLAGS := -Wall \
 	$(call cc-option,-Wwrite-strings) \
 	$(call cc-option,-Wno-sign-compare)
 CFLAGS += $(WFLAGS)
-CPPFLAGS += -D_FILE_OFFSET_BITS=64
+SECTION_CFLAGS := $(call cc-option,-ffunction-sections -fdata-sections -Wl$(comma)--gc-sections)
+CFLAGS += $(SECTION_CFLAGS)
 
-DESTDIR ?= /usr/local
+ifneq ($(WITHOUT_LARGEFILE), 1)
+  CPPFLAGS += -D_FILE_OFFSET_BITS=64
+endif
+
+DESTDIR?=
 PREFIX=/usr
 EXEC_PREFIX=$(PREFIX)
 SBINDIR=$(EXEC_PREFIX)/sbin
@@ -23,44 +29,58 @@ INCLUDEDIR=$(PREFIX)/include
 
 ifndef BUILDDIR
 ifeq ($(origin CROSS),undefined)
-  BUILDDIR := $(PWD)
+  BUILDDIR := $(CURDIR)
 else
 # Remove the trailing slash to make the directory name
-  BUILDDIR := $(PWD)/$(CROSS:-=)
+  BUILDDIR := $(CURDIR)/$(CROSS:-=)
 endif
 endif
 override BUILDDIR := $(patsubst %/,%,$(BUILDDIR))
 
 override TARGETS := $(addprefix $(BUILDDIR)/,$(TARGETS))
 
-SUBDIRS_ALL = $(patsubst %,subdirs_%_all,$(SUBDIRS))
-SUBDIRS_CLEAN = $(patsubst %,subdirs_%_clean,$(SUBDIRS))
-SUBDIRS_INSTALL = $(patsubst %,subdirs_%_install,$(SUBDIRS))
+ifeq ($(V),1)
+XECHO = @:
+XPRINTF = @:
+Q =
+else
+XECHO = @echo
+XPRINTF = @printf
+Q = @
+endif
+define BECHO
+$(XPRINTF) '  %-7s %s\n' "$1" "$(subst $(BUILDDIR)/,,$@)"
+endef
 
-all:: $(TARGETS) $(SUBDIRS_ALL)
+all:: $(TARGETS)
 
-clean:: $(SUBDIRS_CLEAN)
+clean::
 	rm -f $(BUILDDIR)/*.o $(TARGETS) $(BUILDDIR)/.*.c.dep
 
-install:: $(TARGETS) $(SUBDIRS_INSTALL)
+install:: $(TARGETS)
 
-%: %.o
-	$(CC) $(CFLAGS) $(LDFLAGS) $(LDFLAGS_$(notdir $@)) -g -o $@ $^ $(LDLIBS) $(LDLIBS_$(notdir $@))
+define _mkdep
+$(BUILDDIR)/$1$2: $(addprefix $(BUILDDIR)/$1,$(obj-$2) $3) $(addprefix $(BUILDDIR)/,$4)
+endef
+define mkdep
+$(call _mkdep,$1,$2,$3 $2.o,$4 lib/libmtd.a)
+endef
+
+%: %.o $(LDDEPS)
+	$(call BECHO,LD)
+	$(Q)$(CC) $(CFLAGS) $(LDFLAGS) $(LDFLAGS_$(notdir $@)) -g -o $@ $^ $(LDLIBS) $(LDLIBS_$(notdir $@))
 
 $(BUILDDIR)/%.a:
-	$(AR) crv $@ $^
-	$(RANLIB) $@
+	$(call BECHO,AR)
+	$(Q)$(AR) cr $@ $^
+	$(Q)$(RANLIB) $@
 
-$(BUILDDIR)/%.o: %.c
+$(BUILDDIR)/%.o: %.c $(OBJDEPS)
 ifneq ($(BUILDDIR),$(CURDIR))
-	mkdir -p $(dir $@)
+	$(Q)mkdir -p $(dir $@)
 endif
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $< -g -Wp,-MD,$(BUILDDIR)/.$(<F).dep
-
-subdirs_%:
-	d=$(patsubst subdirs_%,%,$@); \
-	t=`echo $$d | sed s:.*_::` d=`echo $$d | sed s:_.*::`; \
-	$(MAKE) BUILDDIR=$(BUILDDIR)/$$d -C $$d $$t
+	$(call BECHO,CC)
+	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $< -g -Wp,-MD,$(BUILDDIR)/.$(<F).dep
 
 .SUFFIXES:
 

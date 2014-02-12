@@ -47,6 +47,8 @@
  *  -Erik, November 2002
  */
 
+#define PROGRAM_NAME "mkfs.jffs2"
+
 #define _GNU_SOURCE
 #include <sys/types.h>
 #include <stdio.h>
@@ -69,19 +71,18 @@
 #include <sys/acl.h>
 #endif
 #include <byteswap.h>
-#define crc32 __complete_crap
-#include <zlib.h>
-#undef crc32
-#include "crc32.h"
+#include <crc32.h>
+#include <inttypes.h>
+
 #include "rbtree.h"
+#include "common.h"
 
 /* Do not use the weird XPG version of basename */
 #undef basename
 
 //#define DMALLOC
-//#define mkfs_debug_msg    error_msg
+//#define mkfs_debug_msg    errmsg
 #define mkfs_debug_msg(a...)	{ }
-#define min(x,y) ({ typeof((x)) _x = (x); typeof((y)) _y = (y); (_x>_y)?_y:_x; })
 
 #define PAD(x) (((x)+3)&~3)
 
@@ -110,8 +111,6 @@ static int squash_uids = 0;
 static int squash_perms = 0;
 static int fake_times = 0;
 int target_endian = __BYTE_ORDER;
-static const char *const app_name = "mkfs.jffs2";
-static const char *const memory_exhausted = "memory exhausted";
 
 uint32_t find_hardlink(struct filesystem_entry *e)
 {
@@ -124,11 +123,11 @@ uint32_t find_hardlink(struct filesystem_entry *e)
 		f = rb_entry(parent, struct filesystem_entry, hardlink_rb);
 
 		if ((f->sb.st_dev < e->sb.st_dev) ||
-		    (f->sb.st_dev == e->sb.st_dev && 
+		    (f->sb.st_dev == e->sb.st_dev &&
 		     f->sb.st_ino < e->sb.st_ino))
 			n = &parent->rb_left;
 		else if ((f->sb.st_dev > e->sb.st_dev) ||
-			 (f->sb.st_dev == e->sb.st_dev && 
+			 (f->sb.st_dev == e->sb.st_dev &&
 			  f->sb.st_ino > e->sb.st_ino)) {
 			n = &parent->rb_right;
 		} else
@@ -139,104 +138,6 @@ uint32_t find_hardlink(struct filesystem_entry *e)
 	rb_insert_color(&e->hardlink_rb, &hardlinks);
 	return 0;
 }
-
-static void verror_msg(const char *s, va_list p)
-{
-	fflush(stdout);
-	fprintf(stderr, "%s: ", app_name);
-	vfprintf(stderr, s, p);
-}
-static void error_msg(const char *s, ...)
-{
-	va_list p;
-
-	va_start(p, s);
-	verror_msg(s, p);
-	va_end(p);
-	putc('\n', stderr);
-}
-
-static void error_msg_and_die(const char *s, ...)
-{
-	va_list p;
-
-	va_start(p, s);
-	verror_msg(s, p);
-	va_end(p);
-	putc('\n', stderr);
-	exit(EXIT_FAILURE);
-}
-
-static void vperror_msg(const char *s, va_list p)
-{
-	int err = errno;
-
-	if (s == 0)
-		s = "";
-	verror_msg(s, p);
-	if (*s)
-		s = ": ";
-	fprintf(stderr, "%s%s\n", s, strerror(err));
-}
-
-static void perror_msg(const char *s, ...)
-{
-	va_list p;
-
-	va_start(p, s);
-	vperror_msg(s, p);
-	va_end(p);
-}
-
-static void perror_msg_and_die(const char *s, ...)
-{
-	va_list p;
-
-	va_start(p, s);
-	vperror_msg(s, p);
-	va_end(p);
-	exit(EXIT_FAILURE);
-}
-
-#ifndef DMALLOC
-extern void *xmalloc(size_t size)
-{
-	void *ptr = malloc(size);
-
-	if (ptr == NULL && size != 0)
-		error_msg_and_die(memory_exhausted);
-	return ptr;
-}
-
-extern void *xcalloc(size_t nmemb, size_t size)
-{
-	void *ptr = calloc(nmemb, size);
-
-	if (ptr == NULL && nmemb != 0 && size != 0)
-		error_msg_and_die(memory_exhausted);
-	return ptr;
-}
-
-extern void *xrealloc(void *ptr, size_t size)
-{
-	ptr = realloc(ptr, size);
-	if (ptr == NULL && size != 0)
-		error_msg_and_die(memory_exhausted);
-	return ptr;
-}
-
-extern char *xstrdup(const char *s)
-{
-	char *t;
-
-	if (s == NULL)
-		return NULL;
-	t = strdup(s);
-	if (t == NULL)
-		error_msg_and_die(memory_exhausted);
-	return t;
-}
-#endif
 
 extern char *xreadlink(const char *path)
 {
@@ -249,7 +150,7 @@ extern char *xreadlink(const char *path)
 		buf = xrealloc(buf, bufsize += GROWBY);
 		readsize = readlink(path, buf, bufsize); /* 1st try */
 		if (readsize == -1) {
-			perror_msg("%s:%s", app_name, path);
+			sys_errmsg("%s:%s", PROGRAM_NAME, path);
 			return NULL;
 		}
 	}
@@ -263,7 +164,7 @@ static FILE *xfopen(const char *path, const char *mode)
 {
 	FILE *fp;
 	if ((fp = fopen(path, mode)) == NULL)
-		perror_msg_and_die("%s", path);
+		sys_errmsg_die("%s", path);
 	return fp;
 }
 
@@ -309,8 +210,8 @@ static struct filesystem_entry *find_filesystem_entry(
 	return (NULL);
 }
 
-static struct filesystem_entry *add_host_filesystem_entry(
-		char *name, char *path, unsigned long uid, unsigned long gid,
+static struct filesystem_entry *add_host_filesystem_entry(const char *name,
+		const char *path, unsigned long uid, unsigned long gid,
 		unsigned long mode, dev_t rdev, struct filesystem_entry *parent)
 {
 	int status;
@@ -327,13 +228,13 @@ static struct filesystem_entry *add_host_filesystem_entry(
 		 * device nodes), but if they _do_ exist the specified mode had
 		 * better match the actual file or strange things will happen.... */
 		if ((mode & S_IFMT) != (sb.st_mode & S_IFMT)) {
-			error_msg_and_die ("%s: file type does not match specified type!", path);
+			errmsg_die ("%s: file type does not match specified type!", path);
 		}
 		timestamp = sb.st_mtime;
 	} else {
 		/* If this is a regular file, it _must_ exist on disk */
 		if ((mode & S_IFMT) == S_IFREG) {
-			error_msg_and_die("%s: does not exist!", path);
+			errmsg_die("%s: does not exist!", path);
 		}
 	}
 
@@ -363,7 +264,7 @@ static struct filesystem_entry *add_host_filesystem_entry(
 	tmp = xstrdup(name);
 	entry->path = xstrdup(dirname(tmp));
 	free(tmp);
-	
+
 	entry->sb.st_ino = sb.st_ino;
 	entry->sb.st_dev = sb.st_dev;
 	entry->sb.st_nlink = sb.st_nlink;
@@ -401,7 +302,8 @@ static struct filesystem_entry *add_host_filesystem_entry(
 }
 
 static struct filesystem_entry *recursive_add_host_directory(
-		struct filesystem_entry *parent, char *targetpath, char *hostpath)
+		struct filesystem_entry *parent, const char *targetpath,
+		const char *hostpath)
 {
 	int i, n;
 	struct stat sb;
@@ -411,7 +313,7 @@ static struct filesystem_entry *recursive_add_host_directory(
 
 
 	if (lstat(hostpath, &sb)) {
-		perror_msg_and_die("%s", hostpath);
+		sys_errmsg_die("%s", hostpath);
 	}
 
 	entry = add_host_filesystem_entry(targetpath, hostpath,
@@ -419,7 +321,7 @@ static struct filesystem_entry *recursive_add_host_directory(
 
 	n = scandir(hostpath, &namelist, 0, alphasort);
 	if (n < 0) {
-		perror_msg_and_die("opening directory %s", hostpath);
+		sys_errmsg_die("opening directory %s", hostpath);
 	}
 
 	for (i=0; i<n; i++)
@@ -432,14 +334,14 @@ static struct filesystem_entry *recursive_add_host_directory(
 			continue;
 		}
 
-		asprintf(&hpath, "%s/%s", hostpath, dp->d_name);
+		xasprintf(&hpath, "%s/%s", hostpath, dp->d_name);
 		if (lstat(hpath, &sb)) {
-			perror_msg_and_die("%s", hpath);
+			sys_errmsg_die("%s", hpath);
 		}
 		if (strcmp(targetpath, "/") == 0) {
-			asprintf(&tpath, "%s%s", targetpath, dp->d_name);
+			xasprintf(&tpath, "%s%s", targetpath, dp->d_name);
 		} else {
-			asprintf(&tpath, "%s/%s", targetpath, dp->d_name);
+			xasprintf(&tpath, "%s/%s", targetpath, dp->d_name);
 		}
 
 		switch (sb.st_mode & S_IFMT) {
@@ -458,7 +360,7 @@ static struct filesystem_entry *recursive_add_host_directory(
 				break;
 
 			default:
-				error_msg("Unknown file type %o for %s", sb.st_mode, hpath);
+				errmsg("Unknown file type %o for %s", sb.st_mode, hpath);
 				break;
 		}
 		free(dp);
@@ -480,7 +382,7 @@ static struct filesystem_entry *recursive_add_host_directory(
 #define GETCWD_SIZE 0
 #else
 #define SCANF_PREFIX "511"
-#define SCANF_STRING(s) (s = malloc(512))
+#define SCANF_STRING(s) (s = xmalloc(512))
 #define GETCWD_SIZE -1
 inline int snprintf(char *str, size_t n, const char *fmt, ...)
 {
@@ -527,10 +429,10 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 	}
 
 	if (!strcmp(name, "/")) {
-		error_msg_and_die("Device table entries require absolute paths");
+		errmsg_die("Device table entries require absolute paths");
 	}
 
-	asprintf(&hostpath, "%s%s", rootdir, name);
+	xasprintf(&hostpath, "%s%s", rootdir, name);
 
 	/* Check if this file already exists... */
 	switch (type) {
@@ -553,10 +455,10 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 			mode |= S_IFLNK;
 			break;
 		default:
-			error_msg_and_die("Unsupported file type '%c'", type);
+			errmsg_die("Unsupported file type '%c'", type);
 	}
 	entry = find_filesystem_entry(root, name, mode);
-	if (entry) {
+	if (entry && !(count > 0 && (type == 'c' || type == 'b'))) {
 		/* Ok, we just need to fixup the existing entry
 		 * and we will be all done... */
 		entry->sb.st_uid = uid;
@@ -573,7 +475,7 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 		parent = find_filesystem_entry(root, dir, S_IFDIR);
 		free(tmp);
 		if (parent == NULL) {
-			error_msg ("skipping device_table entry '%s': no parent directory!", name);
+			errmsg ("skipping device_table entry '%s': no parent directory!", name);
 			free(name);
 			free(hostpath);
 			return 1;
@@ -596,10 +498,10 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 					unsigned long i;
 					char *dname, *hpath;
 
-					for (i = start; i < count; i++) {
-						asprintf(&dname, "%s%lu", name, i);
-						asprintf(&hpath, "%s/%s%lu", rootdir, name, i);
-						rdev = makedev(major, minor + (i * increment - start));
+					for (i = start; i < (start + count); i++) {
+						xasprintf(&dname, "%s%lu", name, i);
+						xasprintf(&hpath, "%s/%s%lu", rootdir, name, i);
+						rdev = makedev(major, minor + (i - start) * increment);
 						add_host_filesystem_entry(dname, hpath, uid, gid,
 								mode, rdev, parent);
 						free(dname);
@@ -612,7 +514,7 @@ static int interpret_table_entry(struct filesystem_entry *root, char *line)
 				}
 				break;
 			default:
-				error_msg_and_die("Unsupported file type '%c'", type);
+				errmsg_die("Unsupported file type '%c'", type);
 		}
 	}
 	free(name);
@@ -725,10 +627,10 @@ static void full_write(int fd, const void *buf, int len)
 		ret = write(fd, buf, len);
 
 		if (ret < 0)
-			perror_msg_and_die("write");
+			sys_errmsg_die("write");
 
 		if (ret == 0)
-			perror_msg_and_die("write returned zero");
+			sys_errmsg_die("write returned zero");
 
 		len -= ret;
 		buf += ret;
@@ -797,7 +699,7 @@ static void write_dirent(struct filesystem_entry *e)
 	rd.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	rd.nodetype = cpu_to_je16(JFFS2_NODETYPE_DIRENT);
 	rd.totlen = cpu_to_je32(sizeof(rd) + strlen(name));
-	rd.hdr_crc = cpu_to_je32(crc32(0, &rd,
+	rd.hdr_crc = cpu_to_je32(mtd_crc32(0, &rd,
 				sizeof(struct jffs2_unknown_node) - 4));
 	rd.pino = cpu_to_je32((e->parent) ? e->parent->ino : 1);
 	rd.version = cpu_to_je32(version++);
@@ -807,8 +709,8 @@ static void write_dirent(struct filesystem_entry *e)
 	rd.type = IFTODT(statbuf->st_mode);
 	//rd.unused[0] = 0;
 	//rd.unused[1] = 0;
-	rd.node_crc = cpu_to_je32(crc32(0, &rd, sizeof(rd) - 8));
-	rd.name_crc = cpu_to_je32(crc32(0, name, strlen(name)));
+	rd.node_crc = cpu_to_je32(mtd_crc32(0, &rd, sizeof(rd) - 8));
+	rd.name_crc = cpu_to_je32(mtd_crc32(0, name, strlen(name)));
 
 	pad_block_if_less_than(sizeof(rd) + rd.nsize);
 	full_write(out_fd, &rd, sizeof(rd));
@@ -828,12 +730,12 @@ static unsigned int write_regular_file(struct filesystem_entry *e)
 
 	statbuf = &(e->sb);
 	if (statbuf->st_size >= JFFS2_MAX_FILE_SIZE) {
-		error_msg("Skipping file \"%s\" too large.", e->path);
+		errmsg("Skipping file \"%s\" too large.", e->path);
 		return -1;
 	}
 	fd = open(e->hostname, O_RDONLY);
 	if (fd == -1) {
-		perror_msg_and_die("%s: open file", e->hostname);
+		sys_errmsg_die("%s: open file", e->hostname);
 	}
 
 	e->ino = ++ino;
@@ -865,7 +767,7 @@ static unsigned int write_regular_file(struct filesystem_entry *e)
 		unsigned char *tbuf = buf;
 
 		if (len < 0) {
-			perror_msg_and_die("read");
+			sys_errmsg_die("read");
 		}
 
 		while (len) {
@@ -894,15 +796,15 @@ static unsigned int write_regular_file(struct filesystem_entry *e)
 			}
 
 			ri.totlen = cpu_to_je32(sizeof(ri) + space);
-			ri.hdr_crc = cpu_to_je32(crc32(0,
+			ri.hdr_crc = cpu_to_je32(mtd_crc32(0,
 						&ri, sizeof(struct jffs2_unknown_node) - 4));
 
 			ri.version = cpu_to_je32(++ver);
 			ri.offset = cpu_to_je32(offset);
 			ri.csize = cpu_to_je32(space);
 			ri.dsize = cpu_to_je32(dsize);
-			ri.node_crc = cpu_to_je32(crc32(0, &ri, sizeof(ri) - 8));
-			ri.data_crc = cpu_to_je32(crc32(0, wbuf, space));
+			ri.node_crc = cpu_to_je32(mtd_crc32(0, &ri, sizeof(ri) - 8));
+			ri.data_crc = cpu_to_je32(mtd_crc32(0, wbuf, space));
 
 			full_write(out_fd, &ri, sizeof(ri));
 			totcomp += sizeof(ri);
@@ -927,11 +829,11 @@ static unsigned int write_regular_file(struct filesystem_entry *e)
 
 		ri.version = cpu_to_je32(++ver);
 		ri.totlen = cpu_to_je32(sizeof(ri));
-		ri.hdr_crc = cpu_to_je32(crc32(0,
+		ri.hdr_crc = cpu_to_je32(mtd_crc32(0,
 					&ri, sizeof(struct jffs2_unknown_node) - 4));
 		ri.csize = cpu_to_je32(0);
 		ri.dsize = cpu_to_je32(0);
-		ri.node_crc = cpu_to_je32(crc32(0, &ri, sizeof(ri) - 8));
+		ri.node_crc = cpu_to_je32(mtd_crc32(0, &ri, sizeof(ri) - 8));
 
 		full_write(out_fd, &ri, sizeof(ri));
 		padword();
@@ -956,7 +858,7 @@ static void write_symlink(struct filesystem_entry *e)
 
 	len = strlen(e->link);
 	if (len > JFFS2_MAX_SYMLINK_LEN) {
-		error_msg("symlink too large. Truncated to %d chars.",
+		errmsg("symlink too large. Truncated to %d chars.",
 				JFFS2_MAX_SYMLINK_LEN);
 		len = JFFS2_MAX_SYMLINK_LEN;
 	}
@@ -966,7 +868,7 @@ static void write_symlink(struct filesystem_entry *e)
 	ri.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	ri.nodetype = cpu_to_je16(JFFS2_NODETYPE_INODE);
 	ri.totlen = cpu_to_je32(sizeof(ri) + len);
-	ri.hdr_crc = cpu_to_je32(crc32(0,
+	ri.hdr_crc = cpu_to_je32(mtd_crc32(0,
 				&ri, sizeof(struct jffs2_unknown_node) - 4));
 
 	ri.ino = cpu_to_je32(e->ino);
@@ -980,8 +882,8 @@ static void write_symlink(struct filesystem_entry *e)
 	ri.version = cpu_to_je32(1);
 	ri.csize = cpu_to_je32(len);
 	ri.dsize = cpu_to_je32(len);
-	ri.node_crc = cpu_to_je32(crc32(0, &ri, sizeof(ri) - 8));
-	ri.data_crc = cpu_to_je32(crc32(0, e->link, len));
+	ri.node_crc = cpu_to_je32(mtd_crc32(0, &ri, sizeof(ri) - 8));
+	ri.data_crc = cpu_to_je32(mtd_crc32(0, e->link, len));
 
 	pad_block_if_less_than(sizeof(ri) + len);
 	full_write(out_fd, &ri, sizeof(ri));
@@ -1008,7 +910,7 @@ static void write_pipe(struct filesystem_entry *e)
 	ri.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	ri.nodetype = cpu_to_je16(JFFS2_NODETYPE_INODE);
 	ri.totlen = cpu_to_je32(sizeof(ri));
-	ri.hdr_crc = cpu_to_je32(crc32(0,
+	ri.hdr_crc = cpu_to_je32(mtd_crc32(0,
 				&ri, sizeof(struct jffs2_unknown_node) - 4));
 
 	ri.ino = cpu_to_je32(e->ino);
@@ -1022,7 +924,7 @@ static void write_pipe(struct filesystem_entry *e)
 	ri.version = cpu_to_je32(1);
 	ri.csize = cpu_to_je32(0);
 	ri.dsize = cpu_to_je32(0);
-	ri.node_crc = cpu_to_je32(crc32(0, &ri, sizeof(ri) - 8));
+	ri.node_crc = cpu_to_je32(mtd_crc32(0, &ri, sizeof(ri) - 8));
 	ri.data_crc = cpu_to_je32(0);
 
 	pad_block_if_less_than(sizeof(ri));
@@ -1048,7 +950,7 @@ static void write_special_file(struct filesystem_entry *e)
 	ri.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	ri.nodetype = cpu_to_je16(JFFS2_NODETYPE_INODE);
 	ri.totlen = cpu_to_je32(sizeof(ri) + sizeof(kdev));
-	ri.hdr_crc = cpu_to_je32(crc32(0,
+	ri.hdr_crc = cpu_to_je32(mtd_crc32(0,
 				&ri, sizeof(struct jffs2_unknown_node) - 4));
 
 	ri.ino = cpu_to_je32(e->ino);
@@ -1062,8 +964,8 @@ static void write_special_file(struct filesystem_entry *e)
 	ri.version = cpu_to_je32(1);
 	ri.csize = cpu_to_je32(sizeof(kdev));
 	ri.dsize = cpu_to_je32(sizeof(kdev));
-	ri.node_crc = cpu_to_je32(crc32(0, &ri, sizeof(ri) - 8));
-	ri.data_crc = cpu_to_je32(crc32(0, &kdev, sizeof(kdev)));
+	ri.node_crc = cpu_to_je32(mtd_crc32(0, &ri, sizeof(ri) - 8));
+	ri.data_crc = cpu_to_je32(mtd_crc32(0, &kdev, sizeof(kdev)));
 
 	pad_block_if_less_than(sizeof(ri) + sizeof(kdev));
 	full_write(out_fd, &ri, sizeof(ri));
@@ -1089,7 +991,7 @@ static uint32_t highest_xseqno = 0;
 
 static struct {
 	int xprefix;
-	char *string;
+	const char *string;
 	int length;
 } xprefix_tbl[] = {
 	{ JFFS2_XPREFIX_USER, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN },
@@ -1176,15 +1078,15 @@ static xattr_entry_t *create_xattr_entry(int xprefix, char *xname, char *xvalue,
 	rx.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	rx.nodetype = cpu_to_je16(JFFS2_NODETYPE_XATTR);
 	rx.totlen = cpu_to_je32(PAD(sizeof(rx) + xe->name_len + 1 + xe->value_len));
-	rx.hdr_crc = cpu_to_je32(crc32(0, &rx, sizeof(struct jffs2_unknown_node) - 4));
+	rx.hdr_crc = cpu_to_je32(mtd_crc32(0, &rx, sizeof(struct jffs2_unknown_node) - 4));
 
 	rx.xid = cpu_to_je32(xe->xid);
 	rx.version = cpu_to_je32(1);	/* initial version */
 	rx.xprefix = xprefix;
 	rx.name_len = xe->name_len;
 	rx.value_len = cpu_to_je16(xe->value_len);
-	rx.data_crc = cpu_to_je32(crc32(0, xe->xname, xe->name_len + 1 + xe->value_len));
-	rx.node_crc = cpu_to_je32(crc32(0, &rx, sizeof(rx) - 4));
+	rx.data_crc = cpu_to_je32(mtd_crc32(0, xe->xname, xe->name_len + 1 + xe->value_len));
+	rx.node_crc = cpu_to_je32(mtd_crc32(0, &rx, sizeof(rx) - 4));
 
 	pad_block_if_less_than(sizeof(rx) + xe->name_len + 1 + xe->value_len);
 	full_write(out_fd, &rx, sizeof(rx));
@@ -1210,7 +1112,7 @@ static xattr_entry_t *find_xattr_entry(int xprefix, char *xname, char *xvalue, i
 		formalize_posix_acl(xvalue, &value_len);
 
 	name_len = strlen(xname);
-	index = (crc32(0, xname, name_len) ^ crc32(0, xvalue, value_len)) % XATTRENTRY_HASHSIZE;
+	index = (mtd_crc32(0, xname, name_len) ^ mtd_crc32(0, xvalue, value_len)) % XATTRENTRY_HASHSIZE;
 	for (xe = xentry_hash[index]; xe; xe = xe->next) {
 		if (xe->xprefix == xprefix
 				&& xe->value_len == value_len
@@ -1231,7 +1133,8 @@ static void write_xattr_entry(struct filesystem_entry *e)
 	struct jffs2_raw_xref ref;
 	struct xattr_entry *xe;
 	char xlist[XATTR_BUFFER_SIZE], xvalue[XATTR_BUFFER_SIZE];
-	char *xname, *prefix_str;
+	char *xname;
+	const char *prefix_str;
 	int i, xprefix, prefix_len;
 	int list_sz, offset, name_len, value_len;
 
@@ -1289,11 +1192,11 @@ static void write_xattr_entry(struct filesystem_entry *e)
 		ref.magic = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 		ref.nodetype = cpu_to_je16(JFFS2_NODETYPE_XREF);
 		ref.totlen = cpu_to_je32(sizeof(ref));
-		ref.hdr_crc = cpu_to_je32(crc32(0, &ref, sizeof(struct jffs2_unknown_node) - 4));
+		ref.hdr_crc = cpu_to_je32(mtd_crc32(0, &ref, sizeof(struct jffs2_unknown_node) - 4));
 		ref.ino = cpu_to_je32(e->ino);
 		ref.xid = cpu_to_je32(xe->xid);
 		ref.xseqno = cpu_to_je32(highest_xseqno += 2);
-		ref.node_crc = cpu_to_je32(crc32(0, &ref, sizeof(ref) - 4));
+		ref.node_crc = cpu_to_je32(mtd_crc32(0, &ref, sizeof(ref) - 4));
 
 		pad_block_if_less_than(sizeof(ref));
 		full_write(out_fd, &ref, sizeof(ref));
@@ -1330,7 +1233,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 		} else switch (e->sb.st_mode & S_IFMT) {
 			case S_IFDIR:
 				if (verbose) {
-					printf("\td %04o %9lu             %5d:%-3d %s\n",
+					printf("\td %04o %9" PRIu64 "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) (e->sb.st_uid), (int) (e->sb.st_gid),
 							e->name);
@@ -1340,7 +1243,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFSOCK:
 				if (verbose) {
-					printf("\ts %04o %9lu             %5d:%-3d %s\n",
+					printf("\ts %04o %9" PRIu64 "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
@@ -1349,7 +1252,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFIFO:
 				if (verbose) {
-					printf("\tp %04o %9lu             %5d:%-3d %s\n",
+					printf("\tp %04o %9" PRIu64 "             %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
@@ -1378,7 +1281,7 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				break;
 			case S_IFLNK:
 				if (verbose) {
-					printf("\tl %04o %9lu             %5d:%-3d %s -> %s\n",
+					printf("\tl %04o %9" PRIu64 "             %5d:%-3d %s -> %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name,
 							e->link);
@@ -1390,13 +1293,13 @@ static void recursive_populate_directory(struct filesystem_entry *dir)
 				wrote = write_regular_file(e);
 				write_xattr_entry(e);
 				if (verbose) {
-					printf("\tf %04o %9lu (%9u) %5d:%-3d %s\n",
+					printf("\tf %04o %9" PRIu64 " (%9u) %5d:%-3d %s\n",
 							e->sb.st_mode & ~S_IFMT, e->sb.st_size, wrote,
 							(int) e->sb.st_uid, (int) e->sb.st_gid, e->name);
 				}
 				break;
 			default:
-				error_msg("Unknown mode %o for %s", e->sb.st_mode,
+				errmsg("Unknown mode %o for %s", e->sb.st_mode,
 						e->fullname);
 				break;
 		}
@@ -1421,7 +1324,7 @@ static void create_target_filesystem(struct filesystem_entry *root)
 	cleanmarker.magic    = cpu_to_je16(JFFS2_MAGIC_BITMASK);
 	cleanmarker.nodetype = cpu_to_je16(JFFS2_NODETYPE_CLEANMARKER);
 	cleanmarker.totlen   = cpu_to_je32(cleanmarker_size);
-	cleanmarker.hdr_crc  = cpu_to_je32(crc32(0, &cleanmarker, sizeof(struct jffs2_unknown_node)-4));
+	cleanmarker.hdr_crc  = cpu_to_je32(mtd_crc32(0, &cleanmarker, sizeof(struct jffs2_unknown_node)-4));
 
 	if (ino == 0)
 		ino = 1;
@@ -1468,6 +1371,7 @@ static struct option long_options[] = {
 	{"devtable", 1, NULL, 'D'},
 	{"compression-mode", 1, NULL, 'm'},
 	{"disable-compressor", 1, NULL, 'x'},
+	{"enable-compressor", 1, NULL, 'X'},
 	{"test-compression", 0, NULL, 't'},
 	{"compressor-priority", 1, NULL, 'y'},
 	{"incremental", 1, NULL, 'i'},
@@ -1479,7 +1383,7 @@ static struct option long_options[] = {
 	{NULL, 0, NULL, 0}
 };
 
-static char *helptext =
+static const char helptext[] =
 "Usage: mkfs.jffs2 [OPTIONS]\n"
 "Make a JFFS2 file system image from an existing directory tree\n\n"
 "Options:\n"
@@ -1487,7 +1391,9 @@ static char *helptext =
 "                          not specified, the output is padded to the end of\n"
 "                          the final erase block\n"
 "  -r, -d, --root=DIR      Build file system from directory DIR (default: cwd)\n"
-"  -s, --pagesize=SIZE     Use page size (max data node size) SIZE (default: 4KiB)\n"
+"  -s, --pagesize=SIZE     Use page size (max data node size) SIZE.\n"
+"                          Set according to target system's memory management\n"
+"                          page size (default: 4KiB)\n"
 "  -e, --eraseblock=SIZE   Use erase block size SIZE (default: 64KiB)\n"
 "  -c, --cleanmarker=SIZE  Size of cleanmarker (default 12)\n"
 "  -m, --compr-mode=MODE   Select compression mode (default: priortiry)\n"
@@ -1518,7 +1424,7 @@ static char *helptext =
 "  -V, --version           Display version information\n"
 "  -i, --incremental=FILE  Parse FILE and generate appendage output for it\n\n";
 
-static char *revtext = "1.60";
+static const char revtext[] = "1.60";
 
 int load_next_block() {
 
@@ -1552,7 +1458,7 @@ void process_buffer(int inp_size) {
 
 		if (je16_to_cpu (node->u.magic) != JFFS2_MAGIC_BITMASK)	{
 			if (!bitchbitmask++)
-				printf ("Wrong bitmask  at  0x%08x, 0x%04x\n", p - file_buffer, je16_to_cpu (node->u.magic));
+				printf ("Wrong bitmask  at  0x%08zx, 0x%04x\n", p - file_buffer, je16_to_cpu (node->u.magic));
 			p += 4;
 			continue;
 		}
@@ -1572,7 +1478,7 @@ void process_buffer(int inp_size) {
 
 			case JFFS2_NODETYPE_INODE:
 				if(verbose)
-					printf ("%8s Inode      node at 0x%08x, totlen 0x%08x, #ino  %5d, version %5d, isize %8d, csize %8d, dsize %8d, offset %8d\n",
+					printf ("%8s Inode      node at 0x%08zx, totlen 0x%08x, #ino  %5d, version %5d, isize %8d, csize %8d, dsize %8d, offset %8d\n",
 							obsolete ? "Obsolete" : "",
 							p - file_buffer, je32_to_cpu (node->i.totlen), je32_to_cpu (node->i.ino),
 							je32_to_cpu ( node->i.version), je32_to_cpu (node->i.isize),
@@ -1589,7 +1495,7 @@ void process_buffer(int inp_size) {
 				name [node->d.nsize] = 0x0;
 
 				if(verbose)
-					printf ("%8s Dirent     node at 0x%08x, totlen 0x%08x, #pino %5d, version %5d, #ino  %8d, nsize %8d, name %s\n",
+					printf ("%8s Dirent     node at 0x%08zx, totlen 0x%08x, #pino %5d, version %5d, #ino  %8d, nsize %8d, name %s\n",
 							obsolete ? "Obsolete" : "",
 							p - file_buffer, je32_to_cpu (node->d.totlen), je32_to_cpu (node->d.pino),
 							je32_to_cpu ( node->d.version), je32_to_cpu (node->d.ino),
@@ -1600,7 +1506,7 @@ void process_buffer(int inp_size) {
 
 			case JFFS2_NODETYPE_CLEANMARKER:
 				if (verbose) {
-					printf ("%8s Cleanmarker     at 0x%08x, totlen 0x%08x\n",
+					printf ("%8s Cleanmarker     at 0x%08zx, totlen 0x%08x\n",
 							obsolete ? "Obsolete" : "",
 							p - file_buffer, je32_to_cpu (node->u.totlen));
 				}
@@ -1610,7 +1516,7 @@ void process_buffer(int inp_size) {
 
 			case JFFS2_NODETYPE_PADDING:
 				if (verbose) {
-					printf ("%8s Padding    node at 0x%08x, totlen 0x%08x\n",
+					printf ("%8s Padding    node at 0x%08zx, totlen 0x%08x\n",
 							obsolete ? "Obsolete" : "",
 							p - file_buffer, je32_to_cpu (node->u.totlen));
 				}
@@ -1624,7 +1530,7 @@ void process_buffer(int inp_size) {
 
 			default:
 				if (verbose) {
-					printf ("%8s Unknown    node at 0x%08x, totlen 0x%08x\n",
+					printf ("%8s Unknown    node at 0x%08zx, totlen 0x%08x\n",
 							obsolete ? "Obsolete" : "",
 							p - file_buffer, je32_to_cpu (node->u.totlen));
 				}
@@ -1637,14 +1543,7 @@ void process_buffer(int inp_size) {
 void parse_image(){
 	int ret;
 
-	file_buffer = malloc(erase_block_size);
-
-	if (!file_buffer) {
-		perror("out of memory");
-		close (in_fd);
-		close (out_fd);
-		exit(1);
-	}
+	file_buffer = xmalloc(erase_block_size);
 
 	while ((ret = load_next_block())) {
 		process_buffer(ret);
@@ -1682,15 +1581,15 @@ int main(int argc, char **argv)
 			case 'D':
 				devtable = xfopen(optarg, "r");
 				if (fstat(fileno(devtable), &sb) < 0)
-					perror_msg_and_die(optarg);
+					sys_errmsg_die("%s", optarg);
 				if (sb.st_size < 10)
-					error_msg_and_die("%s: not a proper device table file", optarg);
+					errmsg_die("%s: not a proper device table file", optarg);
 				break;
 
 			case 'r':
 			case 'd':	/* for compatibility with mkfs.jffs, genext2fs, etc... */
 				if (rootdir != default_rootdir) {
-					error_msg_and_die("root directory specified more than once");
+					errmsg_die("root directory specified more than once");
 				}
 				rootdir = xstrdup(optarg);
 				break;
@@ -1702,11 +1601,11 @@ int main(int argc, char **argv)
 
 			case 'o':
 				if (out_fd != -1) {
-					error_msg_and_die("output filename specified more than once");
+					errmsg_die("output filename specified more than once");
 				}
 				out_fd = open(optarg, O_CREAT | O_TRUNC | O_RDWR, 0644);
 				if (out_fd == -1) {
-					perror_msg_and_die("open output file");
+					sys_errmsg_die("open output file");
 				}
 				break;
 
@@ -1729,21 +1628,21 @@ int main(int argc, char **argv)
 
 			case 'h':
 			case '?':
-				error_msg_and_die(helptext);
+				errmsg_die("%s", helptext);
 
 			case 'v':
 				verbose = 1;
 				break;
 
 			case 'V':
-				error_msg_and_die("revision %s\n", revtext);
+				errmsg_die("revision %s\n", revtext);
 
 			case 'e': {
 						  char *next;
 						  unsigned units = 0;
 						  erase_block_size = strtol(optarg, &next, 0);
 						  if (!erase_block_size)
-							  error_msg_and_die("Unrecognisable erase size\n");
+							  errmsg_die("Unrecognisable erase size\n");
 
 						  if (*next) {
 							  if (!strcmp(next, "KiB")) {
@@ -1751,7 +1650,7 @@ int main(int argc, char **argv)
 							  } else if (!strcmp(next, "MiB")) {
 								  units = 1024 * 1024;
 							  } else {
-								  error_msg_and_die("Unknown units in erasesize\n");
+								  errmsg_die("Unknown units in erasesize\n");
 							  }
 						  } else {
 							  if (erase_block_size < 0x1000)
@@ -1790,52 +1689,52 @@ int main(int argc, char **argv)
 			case 'c':
 					  cleanmarker_size = strtol(optarg, NULL, 0);
 					  if (cleanmarker_size < sizeof(cleanmarker)) {
-						  error_msg_and_die("cleanmarker size must be >= 12");
+						  errmsg_die("cleanmarker size must be >= 12");
 					  }
 					  if (cleanmarker_size >= erase_block_size) {
-						  error_msg_and_die("cleanmarker size must be < eraseblock size");
+						  errmsg_die("cleanmarker size must be < eraseblock size");
 					  }
 					  break;
 			case 'm':
 					  if (jffs2_set_compression_mode_name(optarg)) {
-						  error_msg_and_die("Unknown compression mode %s", optarg);
+						  errmsg_die("Unknown compression mode %s", optarg);
 					  }
 					  break;
 			case 'x':
 					  if (jffs2_disable_compressor_name(optarg)) {
-						  error_msg_and_die("Unknown compressor name %s",optarg);
+						  errmsg_die("Unknown compressor name %s",optarg);
 					  }
 					  break;
 			case 'X':
 					  if (jffs2_enable_compressor_name(optarg)) {
-						  error_msg_and_die("Unknown compressor name %s",optarg);
+						  errmsg_die("Unknown compressor name %s",optarg);
 					  }
 					  break;
 			case 'L':
-					  error_msg_and_die("\n%s",jffs2_list_compressors());
+					  errmsg_die("\n%s",jffs2_list_compressors());
 					  break;
 			case 't':
 					  jffs2_compression_check_set(1);
 					  break;
 			case 'y':
-					  compr_name = malloc(strlen(optarg));
+					  compr_name = xmalloc(strlen(optarg));
 					  sscanf(optarg,"%d:%s",&compr_prior,compr_name);
 					  if ((compr_prior>=0)&&(compr_name)) {
 						  if (jffs2_set_compressor_priority(compr_name, compr_prior))
 							  exit(EXIT_FAILURE);
 					  }
 					  else {
-						  error_msg_and_die("Cannot parse %s",optarg);
+						  errmsg_die("Cannot parse %s",optarg);
 					  }
 					  free(compr_name);
 					  break;
 			case 'i':
 					  if (in_fd != -1) {
-						  error_msg_and_die("(incremental) filename specified more than once");
+						  errmsg_die("(incremental) filename specified more than once");
 					  }
 					  in_fd = open(optarg, O_RDONLY);
 					  if (in_fd == -1) {
-						  perror_msg_and_die("cannot open (incremental) file");
+						  sys_errmsg_die("cannot open (incremental) file");
 					  }
 					  break;
 #ifndef WITHOUT_XATTR
@@ -1857,23 +1756,23 @@ int main(int argc, char **argv)
 		}
 	}
 	if (warn_page_size) {
-		error_msg("Page size for this system is by default %d", page_size);
-		error_msg("Use the --pagesize=SIZE option if this is not what you want");
+		errmsg("Page size for this system is by default %d", page_size);
+		errmsg("Use the --pagesize=SIZE option if this is not what you want");
 	}
 	if (out_fd == -1) {
 		if (isatty(1)) {
-			error_msg_and_die(helptext);
+			errmsg_die("%s", helptext);
 		}
 		out_fd = 1;
 	}
 	if (lstat(rootdir, &sb)) {
-		perror_msg_and_die("%s", rootdir);
+		sys_errmsg_die("%s", rootdir);
 	}
 	if (chdir(rootdir))
-		perror_msg_and_die("%s", rootdir);
+		sys_errmsg_die("%s", rootdir);
 
 	if (!(cwd = getcwd(0, GETCWD_SIZE)))
-		perror_msg_and_die("getcwd failed");
+		sys_errmsg_die("getcwd failed");
 
 	if(in_fd != -1)
 		parse_image();
