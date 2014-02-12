@@ -24,6 +24,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+#ifndef WITHOUT_LZO
 #include <asm/types.h>
 #include <linux/jffs2.h>
 #include <lzo/lzo1x.h>
@@ -46,7 +48,7 @@ static void *lzo_compress_buf;
  *
  */
 static int jffs2_lzo_cmpr(unsigned char *data_in, unsigned char *cpage_out,
-			  uint32_t *sourcelen, uint32_t *dstlen, void *model)
+			  uint32_t *sourcelen, uint32_t *dstlen)
 {
 	lzo_uint compress_size;
 	int ret;
@@ -66,7 +68,7 @@ static int jffs2_lzo_cmpr(unsigned char *data_in, unsigned char *cpage_out,
 }
 
 static int jffs2_lzo_decompress(unsigned char *data_in, unsigned char *cpage_out,
-				 uint32_t srclen, uint32_t destlen, void *model)
+				 uint32_t srclen, uint32_t destlen)
 {
 	int ret;
 	lzo_uint dl;
@@ -118,3 +120,16 @@ void jffs2_lzo_exit(void)
 	free(lzo_compress_buf);
 	free(lzo_mem);
 }
+
+#else
+
+int jffs2_lzo_init(void)
+{
+	return 0;
+}
+
+void jffs2_lzo_exit(void)
+{
+}
+
+#endif

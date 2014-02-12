@@ -20,9 +20,11 @@
  *          Zoltan Sogor
  */
 
-#include "mkfs.ubifs.h"
+#define PROGRAM_NAME "mkfs.ubifs"
 
-#define PROGRAM_VERSION "1.3"
+#include "mkfs.ubifs.h"
+#include <crc32.h>
+#include "common.h"
 
 /* Size (prime number) of hash table for link counting */
 #define HASH_TABLE_SIZE 10099
@@ -130,28 +132,29 @@ static struct inum_mapping **hash_table;
 /* Inode creation sequence number */
 static unsigned long long creat_sqnum;
 
-static const char *optstring = "d:r:m:o:D:h?vVe:c:g:f:P:k:x:X:j:R:l:j:U";
+static const char *optstring = "d:r:m:o:D:h?vVe:c:g:f:Fp:k:x:X:j:R:l:j:UQq";
 
 static const struct option longopts[] = {
-	{"root",          1, NULL, 'r'},
-	{"min-io-size",   1, NULL, 'm'},
-	{"leb-size",      1, NULL, 'e'},
-	{"max-leb-cnt",   1, NULL, 'c'},
-	{"output",        1, NULL, 'o'},
-	{"devtable",      1, NULL, 'D'},
-	{"help",          0, NULL, 'h'},
-	{"verbose",       0, NULL, 'v'},
-	{"version",       0, NULL, 'V'},
-	{"debug-level",   1, NULL, 'g'},
-	{"jrn-size",      1, NULL, 'j'},
-	{"reserved",      1, NULL, 'R'},
-	{"compr",         1, NULL, 'x'},
-	{"favor-percent", 1, NULL, 'X'},
-	{"fanout",        1, NULL, 'f'},
-	{"keyhash",       1, NULL, 'k'},
-	{"log-lebs",      1, NULL, 'l'},
-	{"orph-lebs",     1, NULL, 'p'},
-	{"squash-uids" ,  0, NULL, 'U'},
+	{"root",               1, NULL, 'r'},
+	{"min-io-size",        1, NULL, 'm'},
+	{"leb-size",           1, NULL, 'e'},
+	{"max-leb-cnt",        1, NULL, 'c'},
+	{"output",             1, NULL, 'o'},
+	{"devtable",           1, NULL, 'D'},
+	{"help",               0, NULL, 'h'},
+	{"verbose",            0, NULL, 'v'},
+	{"version",            0, NULL, 'V'},
+	{"debug-level",        1, NULL, 'g'},
+	{"jrn-size",           1, NULL, 'j'},
+	{"reserved",           1, NULL, 'R'},
+	{"compr",              1, NULL, 'x'},
+	{"favor-percent",      1, NULL, 'X'},
+	{"fanout",             1, NULL, 'f'},
+	{"space-fixup",        0, NULL, 'F'},
+	{"keyhash",            1, NULL, 'k'},
+	{"log-lebs",           1, NULL, 'l'},
+	{"orph-lebs",          1, NULL, 'p'},
+	{"squash-uids" ,       0, NULL, 'U'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -179,6 +182,8 @@ static const char *helptext =
 "                         how many percent better zlib should compress to make\n"
 "                         mkfs.ubifs use zlib instead of LZO (default 20%)\n"
 "-f, --fanout=NUM         fanout NUM (default: 8)\n"
+"-F, --space-fixup        file-system free space has to be fixed up on first mount\n"
+"                         (requires kernel version 3.0 or greater)\n"
 "-k, --keyhash=TYPE       key hash type - \"r5\" or \"test\" (default: \"r5\")\n"
 "-p, --orph-lebs=COUNT    count of erase blocks for orphans (default: 1)\n"
 "-D, --devtable=FILE      use device table FILE\n"
@@ -200,7 +205,15 @@ static const char *helptext =
 "or more percent better than \"lzo\", mkfs.ubifs chooses \"lzo\", otherwise it chooses\n"
 "\"zlib\". The \"--favor-percent\" may specify arbitrary threshold instead of the\n"
 "default 20%.\n\n"
-"The -R parameter specifies amount of bytes reserved for the super-user.\n";
+"The -F parameter is used to set the \"fix up free space\" flag in the superblock,\n"
+"which forces UBIFS to \"fixup\" all the free space which it is going to use. This\n"
+"option is useful to work-around the problem of double free space programming: if the\n"
+"flasher program which flashes the UBI image is unable to skip NAND pages containing\n"
+"only 0xFF bytes, the effect is that some NAND pages are written to twice - first time\n"
+"when flashing the image and the second time when UBIFS is mounted and writes useful\n"
+"data there. A proper UBI-aware flasher should skip such NAND pages, though. Note, this\n"
+"flag may make the first mount very slow, because the \"free space fixup\" procedure\n"
+"takes time. This feature is supported by the Linux kernel starting from version 3.0.\n";
 
 /**
  * make_path - make a path name from a directory and a name.
@@ -357,11 +370,6 @@ static long long add_space_overhead(long long size)
         return size / divisor;
 }
 
-static inline int is_power_of_2(unsigned long long n)
-{
-                return (n != 0 && ((n & (n - 1)) == 0));
-}
-
 static int validate_options(void)
 {
 	int tmp;
@@ -382,7 +390,7 @@ static int validate_options(void)
 		return err_msg("LEB should be multiple of min. I/O units");
 	if (c->leb_size % 8)
 		return err_msg("LEB size has to be multiple of 8");
-	if (c->leb_size > 1024*1024)
+	if (c->leb_size > UBIFS_MAX_LEB_SZ)
 		return err_msg("too large LEB size %d", c->leb_size);
 	if (c->max_leb_cnt < UBIFS_MIN_LEB_CNT)
 		return err_msg("too low max. count of LEBs, minimum is %d",
@@ -575,7 +583,7 @@ static int get_options(int argc, char**argv)
 			verbose = 1;
 			break;
 		case 'V':
-			printf("Version " PROGRAM_VERSION "\n");
+			common_print_version();
 			exit(0);
 		case 'g':
 			debug_level = strtol(optarg, &endp, 0);
@@ -588,6 +596,9 @@ static int get_options(int argc, char**argv)
 			c->fanout = strtol(optarg, &endp, 0);
 			if (*endp != '\0' || endp == optarg || c->fanout <= 0)
 				return err_msg("bad fanout %s", optarg);
+			break;
+		case 'F':
+			c->space_fixup = 1;
 			break;
 		case 'l':
 			c->log_lebs = strtol(optarg, &endp, 0);
@@ -647,17 +658,18 @@ static int get_options(int argc, char**argv)
 
 	if (optind != argc && !output)
 		output = strdup(argv[optind]);
-	if (output)
-		out_ubi = !open_ubi(output);
+
+	if (!output)
+		return err_msg("not output device or file specified");
+
+	out_ubi = !open_ubi(output);
 
 	if (out_ubi) {
 		c->min_io_size = c->di.min_io_size;
 		c->leb_size = c->vi.leb_size;
-		c->max_leb_cnt = c->vi.rsvd_lebs;
+		if (c->max_leb_cnt == -1)
+			c->max_leb_cnt = c->vi.rsvd_lebs;
 	}
-
-	if (!output)
-		return err_msg("not output device or file specified");
 
 	if (c->min_io_size == -1)
 		return err_msg("min. I/O unit was not specified "
@@ -726,6 +738,7 @@ static int get_options(int argc, char**argv)
 						"r5" : "test");
 		printf("\tfanout:       %d\n", c->fanout);
 		printf("\torph_lebs:    %d\n", c->orph_lebs);
+		printf("\tspace_fixup:  %d\n", c->space_fixup);
 	}
 
 	if (validate_options())
@@ -752,7 +765,7 @@ static void prepare_node(void *node, int len)
 	ch->group_type = UBIFS_NO_NODE_GROUP;
 	ch->sqnum = cpu_to_le64(++c->max_sqnum);
 	ch->padding[0] = ch->padding[1] = 0;
-	crc = ubifs_crc32(UBIFS_CRC32_INIT, node + 8, len - 8);
+	crc = mtd_crc32(UBIFS_CRC32_INIT, node + 8, len - 8);
 	ch->crc = cpu_to_le32(crc);
 }
 
@@ -822,7 +835,7 @@ static int do_pad(void *buf, int len)
 		pad_len -= UBIFS_PAD_NODE_SZ;
 		pad_node->pad_len = cpu_to_le32(pad_len);
 
-		crc = ubifs_crc32(UBIFS_CRC32_INIT, buf + 8,
+		crc = mtd_crc32(UBIFS_CRC32_INIT, buf + 8,
 				  UBIFS_PAD_NODE_SZ - 8);
 		ch->crc = cpu_to_le32(crc);
 
@@ -897,9 +910,11 @@ static void set_lprops(int lnum, int offs, int flags)
 	dirty = c->leb_size - free - ALIGN(offs, 8);
 	dbg_msg(3, "LEB %d free %d dirty %d flags %d", lnum, free, dirty,
 		flags);
-	c->lpt[i].free = free;
-	c->lpt[i].dirty = dirty;
-	c->lpt[i].flags = flags;
+	if (i < c->main_lebs) {
+		c->lpt[i].free = free;
+		c->lpt[i].dirty = dirty;
+		c->lpt[i].flags = flags;
+	}
 	c->lst.total_free += free;
 	c->lst.total_dirty += dirty;
 	if (flags & LPROPS_INDEX)
@@ -1168,8 +1183,8 @@ static int add_dent_node(ino_t dir_inum, const char *name, ino_t inum,
 	char *kname;
 	int len;
 
-	dbg_msg(3, "%s ino %lu type %u dir ino %lu", name, inum,
-		(unsigned)type, dir_inum);
+	dbg_msg(3, "%s ino %lu type %u dir ino %lu", name, (unsigned long)inum,
+		(unsigned int)type, (unsigned long)dir_inum);
 	memset(dent, 0, UBIFS_DENT_NODE_SZ);
 
 	dname.name = (void *)name;
@@ -1629,6 +1644,7 @@ static int add_multi_linked_files(void)
 static int write_data(void)
 {
 	int err;
+	mode_t mode = S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 
 	if (root) {
 		err = stat(root, &root_st);
@@ -1638,9 +1654,8 @@ static int write_data(void)
 	} else {
 		root_st.st_mtime = time(NULL);
 		root_st.st_atime = root_st.st_ctime = root_st.st_mtime;
+		root_st.st_mode = mode;
 	}
-	root_st.st_uid = root_st.st_gid = 0;
-	root_st.st_mode = S_IFDIR | S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 
 	head_flags = 0;
 	err = add_directory(root, UBIFS_ROOT_INO, &root_st, !root);
@@ -1718,7 +1733,7 @@ static int write_index(void)
 	struct idx_entry **idx_ptr, **p;
 	struct ubifs_idx_node *idx;
 	struct ubifs_branch *br;
-	int child_cnt, j, level, blnum, boffs, blen, blast_len, err;
+	int child_cnt = 0, j, level, blnum, boffs, blen, blast_len, err;
 
 	dbg_msg(1, "leaf node count: %zd", idx_cnt);
 
@@ -1901,8 +1916,6 @@ static int finalize_leb_cnt(void)
 {
 	c->leb_cnt = head_lnum;
 	if (c->leb_cnt > c->max_leb_cnt)
-		/* TODO: in this case it segfaults because buffer overruns - we
-		 * somewhere allocate smaller buffers - fix */
 		return err_msg("max_leb_cnt too low (%d needed)", c->leb_cnt);
 	c->main_lebs = c->leb_cnt - c->main_first;
 	if (verbose) {
@@ -1961,6 +1974,8 @@ static int write_super(void)
 	}
 	if (c->big_lpt)
 		sup.flags |= cpu_to_le32(UBIFS_FLG_BIGLPT);
+	if (c->space_fixup)
+		sup.flags |= cpu_to_le32(UBIFS_FLG_SPACE_FIXUP);
 
 	return write_node(&sup, UBIFS_SB_NODE_SZ, UBIFS_SB_LNUM, UBI_LONGTERM);
 }

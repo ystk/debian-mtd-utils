@@ -1,10 +1,11 @@
 
+#define PROGRAM_NAME "recv_image"
 #define _XOPEN_SOURCE 500
+#define _BSD_SOURCE	/* struct ip_mreq */
 
 #include <errno.h>
 #include <error.h>
 #include <stdio.h>
-#define __USE_GNU
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,11 +17,11 @@
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
-#include "crc32.h"
+#include <crc32.h>
 #include "mtd/mtd-user.h"
 #include "mcast_image.h"
 
-#define min(x,y) (  (x)>(y)?(y):(x) )
+#include "common.h"
 
 #define WBUF_SIZE 4096
 struct eraseblock {
@@ -39,31 +40,31 @@ int main(int argc, char **argv)
 	struct addrinfo *runp;
 	int ret;
 	int sock;
-	size_t len;
+	ssize_t len;
 	int flfd;
 	struct mtd_info_user meminfo;
 	unsigned char *eb_buf, *decode_buf, **src_pkts;
 	int nr_blocks = 0;
 	int pkts_per_block;
 	int block_nr = -1;
-	uint32_t image_crc;
+	uint32_t image_crc = 0;
 	int total_pkts = 0;
 	int ignored_pkts = 0;
 	loff_t mtdoffset = 0;
 	int badcrcs = 0;
 	int duplicates = 0;
 	int file_mode = 0;
-	struct fec_parms *fec;
+	struct fec_parms *fec = NULL;
 	int i;
 	struct eraseblock *eraseblocks = NULL;
-	uint32_t start_seq;
+	uint32_t start_seq = 0;
 	struct timeval start, now;
 	unsigned long fec_time = 0, flash_time = 0, crc_time = 0,
 		rflash_time = 0, erase_time = 0, net_time = 0;
 
 	if (argc != 4) {
 		fprintf(stderr, "usage: %s <host> <port> <mtddev>\n",
-			(strrchr(argv[0], '/')?:argv[0]-1)+1);
+			PROGRAM_NAME);
 		exit(1);
 	}
 	/* Open the device */
@@ -110,7 +111,7 @@ int main(int argc, char **argv)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_flags = AI_ADDRCONFIG;
 	hints.ai_socktype = SOCK_DGRAM;
-	
+
 	ret = getaddrinfo(argv[1], argv[2], &hints, &ai);
 	if (ret) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
@@ -130,18 +131,18 @@ int main(int argc, char **argv)
 			rq.imr_multiaddr = ((struct sockaddr_in *)runp->ai_addr)->sin_addr;
 			rq.imr_interface.s_addr = INADDR_ANY;
 			if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &rq, sizeof(rq))) {
-				perror("IP_ADD_MEMBERSHIP"); 
+				perror("IP_ADD_MEMBERSHIP");
 				close(sock);
 				continue;
 			}
-			
+
 		} else if (runp->ai_family == AF_INET6 &&
 			   ((struct sockaddr_in6 *)runp->ai_addr)->sin6_addr.s6_addr[0] == 0xff) {
 			struct ipv6_mreq rq;
 			rq.ipv6mr_multiaddr =  ((struct sockaddr_in6 *)runp->ai_addr)->sin6_addr;
 			rq.ipv6mr_interface = 0;
 			if (setsockopt(sock, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &rq, sizeof(rq))) {
-				perror("IPV6_ADD_MEMBERSHIP"); 
+				perror("IPV6_ADD_MEMBERSHIP");
 				close(sock);
 				continue;
 			}
@@ -166,7 +167,7 @@ int main(int argc, char **argv)
 			break;
 		}
 		if (len < sizeof(thispkt)) {
-			fprintf(stderr, "Wrong length %d bytes (expected %d)\n",
+			fprintf(stderr, "Wrong length %zd bytes (expected %zu)\n",
 				len, sizeof(thispkt));
 			continue;
 		}
@@ -244,16 +245,16 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		if (crc32(-1, thispkt.data, PKT_SIZE) != ntohl(thispkt.hdr.thiscrc)) {
+		if (mtd_crc32(-1, thispkt.data, PKT_SIZE) != ntohl(thispkt.hdr.thiscrc)) {
 			printf("\nDiscard %08x pkt %d with bad CRC (%08x not %08x)\n",
 			       block_nr * meminfo.erasesize, ntohs(thispkt.hdr.pkt_nr),
-			       crc32(-1, thispkt.data, PKT_SIZE),
+			       mtd_crc32(-1, thispkt.data, PKT_SIZE),
 			       ntohl(thispkt.hdr.thiscrc));
 			badcrcs++;
 			continue;
 		}
 	pkt_again:
-		eraseblocks[block_nr].pkt_indices[eraseblocks[block_nr].nr_pkts++] = 
+		eraseblocks[block_nr].pkt_indices[eraseblocks[block_nr].nr_pkts++] =
 			ntohs(thispkt.hdr.pkt_nr);
 		total_pkts++;
 		if (!(total_pkts % 50) || total_pkts == pkts_per_block * nr_blocks) {
@@ -289,7 +290,7 @@ int main(int argc, char **argv)
 			       thispkt.data, fits);
 			wrotelen = pwrite(flfd, eraseblocks[block_nr].wbuf, WBUF_SIZE,
 					  eraseblocks[block_nr].flash_offset);
-			
+
 			if (wrotelen < WBUF_SIZE || (block_nr == 5 && eraseblocks[block_nr].nr_pkts == 5 && !faked)) {
 				faked = 1;
 				if (wrotelen < 0)
@@ -307,7 +308,7 @@ int main(int argc, char **argv)
 						~(meminfo.erasesize - 1);
 					erase.length = meminfo.erasesize;
 
-					printf("Will erase at %08x len %08x (bad write was at %08x)\n", 
+					printf("Will erase at %08x len %08x (bad write was at %08x)\n",
 					       erase.start, erase.length, eraseblocks[block_nr].flash_offset);
 					if (ioctl(flfd, MEMERASE, &erase)) {
 						perror("MEMERASE");
@@ -341,7 +342,7 @@ int main(int argc, char **argv)
 			memcpy(eraseblocks[block_nr].wbuf, &thispkt.data[fits], PKT_SIZE - fits);
 			eraseblocks[block_nr].wbuf_ofs = PKT_SIZE - fits;
 		}
-		
+
 		if (eraseblocks[block_nr].nr_pkts == pkts_per_block) {
 			eraseblocks[block_nr].crc = ntohl(thispkt.hdr.block_crc);
 
@@ -387,16 +388,16 @@ int main(int argc, char **argv)
 		gettimeofday(&now, NULL);
 		fec_time += (now.tv_usec - start.tv_usec) / 1000;
 		fec_time += (now.tv_sec - start.tv_sec) * 1000;
-		
+
 		for (i=0; i < pkts_per_block; i++)
 			memcpy(&decode_buf[i*PKT_SIZE], src_pkts[i], PKT_SIZE);
 
 		/* Paranoia */
 		gettimeofday(&start, NULL);
-		if (crc32(-1, decode_buf, meminfo.erasesize) != eraseblocks[block_nr].crc) {
+		if (mtd_crc32(-1, decode_buf, meminfo.erasesize) != eraseblocks[block_nr].crc) {
 			printf("\nCRC mismatch for block #%d: want %08x got %08x\n",
-			       block_nr, eraseblocks[block_nr].crc, 
-			       crc32(-1, decode_buf, meminfo.erasesize));
+			       block_nr, eraseblocks[block_nr].crc,
+			       mtd_crc32(-1, decode_buf, meminfo.erasesize));
 			exit(1);
 		}
 		gettimeofday(&now, NULL);
@@ -409,7 +410,7 @@ int main(int argc, char **argv)
 
 			erase.start = eraseblocks[block_nr].flash_offset;
 			erase.length = meminfo.erasesize;
-			
+
 			printf("\rErasing block at %08x...", erase.start);
 
 			if (ioctl(flfd, MEMERASE, &erase)) {
@@ -429,7 +430,7 @@ int main(int argc, char **argv)
 		if (rwlen < meminfo.erasesize) {
 			if (rwlen < 0) {
 				perror("\ndecoded data write");
-			} else 
+			} else
 				fprintf(stderr, "\nshort write of decoded data\n");
 
 			if (!file_mode) {

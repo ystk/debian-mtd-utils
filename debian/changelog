@@ -1,3 +1,36 @@
+mtd-utils (1:1.5.0-1) unstable; urgency=low
+
+  * New usptream version
+
+ -- Riku Voipio <riku.voipio@linaro.org>  Wed, 16 May 2012 11:51:48 +0300
+
+mtd-utils (1:1.4.9-1) unstable; urgency=low
+
+  * New upstream version
+
+ -- Riku Voipio <riku.voipio@linaro.org>  Thu, 03 May 2012 14:28:04 +0300
+
+mtd-utils (1:1.4.4-1) unstable; urgency=low
+
+  * New upstream version
+  * start using release tags from upstream, thus add epoch
+
+ -- Riku Voipio <riku.voipio@linaro.org>  Mon, 23 May 2011 12:46:10 +0300
+
+mtd-utils (20110107-1) unstable; urgency=medium
+
+  * New upstream version
+  * Ubi creation works again: Closes: #570493, #592485
+  * gcc 4.5 builds work, Closes: #565082
+
+ -- Riku Voipio <riku.voipio@iki.fi>  Fri, 07 Jan 2011 11:50:29 +0200
+
+mtd-utils (20100706-1) unstable; urgency=low
+
+  * New upstream version
+
+ -- Riku Voipio <riku.voipio@iki.fi>  Fri, 06 Aug 2010 23:55:45 +0300
+
 mtd-utils (20090606-1) unstable; urgency=medium
 
   * new upstream snapshot

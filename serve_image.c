@@ -1,14 +1,14 @@
+#define PROGRAM_NAME "serve_image"
 #define _POSIX_C_SOURCE 199309
 
 #include <time.h>
-
-#include <errno.h>  	
-#include <error.h> 	
-#include <netdb.h> 	
-#include <stdio.h> 	
-#include <stdlib.h> 	
+#include <errno.h>
+#include <error.h>
+#include <netdb.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <unistd.h> 	
+#include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -16,7 +16,9 @@
 #include <sys/mman.h>
 #include <netinet/in.h>
 #include <sys/time.h>
-#include "crc32.h"
+#include <crc32.h>
+#include <inttypes.h>
+
 #include "mcast_image.h"
 
 int tx_rate = 80000;
@@ -59,7 +61,7 @@ int main(int argc, char **argv)
 	}
 	if (argc != 5) {
 		fprintf(stderr, "usage: %s <host> <port> <image> <erasesize> [<tx_rate>]\n",
-			(strrchr(argv[0], '/')?:argv[0]-1)+1);
+			PROGRAM_NAME);
 		exit(1);
 	}
 	pkt_delay = (sizeof(pktbuf) * 1000000) / tx_rate;
@@ -81,7 +83,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to allocate last-block buffer\n");
 		exit(1);
 	}
-	
+
 	fec = fec_new(pkts_per_block, total_pkts_per_block);
 	if (!fec) {
 		fprintf(stderr, "Error initialising FEC\n");
@@ -91,7 +93,7 @@ int main(int argc, char **argv)
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_flags = AI_ADDRCONFIG;
 	hints.ai_socktype = SOCK_DGRAM;
-	
+
 	ret = getaddrinfo(argv[1], argv[2], &hints, &ai);
 	if (ret) {
 		fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(ret));
@@ -125,8 +127,8 @@ int main(int argc, char **argv)
 	}
 
 	if (st.st_size % erasesize) {
-		fprintf(stderr, "Image size %ld bytes is not a multiple of erasesize %d bytes\n",
-			st.st_size, erasesize);
+		fprintf(stderr, "Image size %" PRIu64 " bytes is not a multiple of erasesize %d bytes\n",
+				st.st_size, erasesize);
 		exit(1);
 	}
 	image = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, rfd, 0);
@@ -150,7 +152,7 @@ int main(int argc, char **argv)
 	fflush(stdout);
 
 	pktbuf.hdr.resend = 0;
-	pktbuf.hdr.totcrc = htonl(crc32(-1, image, st.st_size));
+	pktbuf.hdr.totcrc = htonl(mtd_crc32(-1, image, st.st_size));
 	pktbuf.hdr.nr_blocks = htonl(nr_blocks);
 	pktbuf.hdr.blocksize = htonl(erasesize);
 	pktbuf.hdr.thislen = htonl(PKT_SIZE);
@@ -163,11 +165,11 @@ int main(int argc, char **argv)
 		printf("\rChecking block CRCS.... %d/%d",
 		       block_nr + 1, nr_blocks);
 		fflush(stdout);
-		block_crcs[block_nr] = crc32(-1, image + (block_nr * erasesize), erasesize);
+		block_crcs[block_nr] = mtd_crc32(-1, image + (block_nr * erasesize), erasesize);
 	}
-		
+
 	printf("\nImage size %ld KiB (0x%08lx). %d blocks at %d pkts/block\n"
-	       "Estimated transmit time per cycle: %ds\n", 
+	       "Estimated transmit time per cycle: %ds\n",
 	       (long)st.st_size / 1024, (long) st.st_size,
 	       nr_blocks, pkts_per_block,
 	       nr_blocks * pkts_per_block * pkt_delay / 1000000);
@@ -200,11 +202,11 @@ int main(int argc, char **argv)
 			   the first $pkts_per_block are cheap enough though
 			   because they're just copies. So alternate between
 			   simple and complex stuff, so that we don't start
-			   to choke and fail to keep up with the expected 
+			   to choke and fail to keep up with the expected
 			   bitrate in the second half of the sequence */
 			if (block_nr & 1)
 				actualpkt = pkt_nr;
-			else 
+			else
 				actualpkt = total_pkts_per_block - 1 - pkt_nr;
 
 			blockptr = image + (erasesize * block_nr);
@@ -213,7 +215,7 @@ int main(int argc, char **argv)
 
 			fec_encode_linear(fec, blockptr, pktbuf.data, actualpkt, PKT_SIZE);
 
-			pktbuf.hdr.thiscrc = htonl(crc32(-1, pktbuf.data, PKT_SIZE));
+			pktbuf.hdr.thiscrc = htonl(mtd_crc32(-1, pktbuf.data, PKT_SIZE));
 			pktbuf.hdr.block_crc = htonl(block_crcs[block_nr]);
 			pktbuf.hdr.block_nr = htonl(block_nr);
 			pktbuf.hdr.pkt_nr = htons(actualpkt);
@@ -244,7 +246,7 @@ int main(int argc, char **argv)
 #endif
 			gettimeofday(&now, NULL);
 #if 1
-			tosleep = nextpkt.tv_usec - now.tv_usec + 
+			tosleep = nextpkt.tv_usec - now.tv_usec +
 				(1000000 * (nextpkt.tv_sec - now.tv_sec));
 
 			/* We need hrtimers for this to actually work */
@@ -274,7 +276,7 @@ int main(int argc, char **argv)
 			   Adjust our expected timings accordingly. If
 			   we're only a little way behind, don't slip yet */
 			if (now.tv_usec > (now.tv_usec + (5 * pkt_delay) +
-					   1000000 * (nextpkt.tv_sec - now.tv_sec))) { 
+					1000000 * (nextpkt.tv_sec - now.tv_sec))) {
 				nextpkt = now;
 			}
 
@@ -289,7 +291,7 @@ int main(int argc, char **argv)
 				writeerrors = 0;
 
 
-			
+
 		}
 	}
 	munmap(image, st.st_size);
